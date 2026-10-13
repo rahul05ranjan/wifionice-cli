@@ -1,174 +1,122 @@
 # wifionice
 
-Reference template for Python CLIs and MCP servers: patterns learned from a stresstest across six derived tools (exit codes, JSON errors, validation, config precedence, atomic state, URL joining, and network-free tests) **plus** a copyable black-box pytest suite for MCP servers.
+CLI für das WIFIonICE-Zug-WLAN (Captive Portal `wifi.bahn.de` / `login.wifionice.de`): automatischer Portal-Checkin inklusive AGB-Bestätigung, Session-Status, Zuggeschwindigkeit und lokaler Logout.
 
-## Install and test
+Kein offizielles Werkzeug der Deutschen Bahn. Nutzung auf eigene Verantwortung; für die Portalnutzung gelten die AGB der DB. Es werden keine Zugangsdaten benötigt und keine gespeichert.
 
-```bash
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -e ".[dev]"
-pytest
-wifionice --help
-```
-
-With uv: `uv sync --extra dev` then `uv run --extra dev pytest`.
-
-## Exit codes
-
-| Code | Meaning |
-|------|---------|
-| 0 | Success |
-| 1 | Invalid input (flags, arguments, validation); argparse usage errors map here (not 2) |
-| 2 | Authentication / authorization |
-| 3 | Network / remote service |
-| 4 | Parse error (JSON, config, state) |
-| 130 | Interrupted (Ctrl-C) or EOF on interactive input |
-
-Implementation: `wifionice_cli.exit_codes` and `wifionice_cli.errors.ArgumentParser`.
-
-## Commands
-
-Global flags: `--json` (single JSON object on stdout for result or error), `--dry-run` (no state writes).
-
-- `wifionice version` — print package version
-- `wifionice config` — show resolved configuration (env overrides file and keyring)
-- `wifionice state PATH` — load/merge/save JSON state (`--set KEY=VALUE`, respects `--dry-run`)
-- `wifionice url BASE SEGMENT` — join URL without dropping `base` path prefix
-- `wifionice validate` — exercise validators (`--count`, `--date`, `--file`)
-
-Examples:
+## Installation
 
 ```bash
-wifionice version
-wifionice config --json
-wifionice url https://api.example.com/v1 users --json
-wifionice validate --count 3 --date 2026-01-15
-wifionice state ./tmp-state.json --set hello=world --dry-run
+uv sync --extra dev
+uv run wifionice --help
 ```
 
-### Configuration
+Alternativ: `pip install -e ".[dev]"`.
 
-Precedence: environment variables, then JSON config file, then optional keyring (`pip install wifionice[keyring]`).
+## Kommandos
 
-| Variable | Purpose |
-|----------|---------|
-| `WIFIONICE_BASE_URL` | API base URL |
-| `WIFIONICE_API_TOKEN` | API token |
-| `WIFIONICE_CONFIG` | Path to config JSON |
+Globale Flags: `--json` (genau ein JSON-Objekt auf stdout, auch im Fehlerfall), `--dry-run` (keine Netzwerk-Requests, keine Schreibzugriffe).
 
-Default config path: `~/.config/wifionice/config.json`.
+| Kommando | Zweck |
+|----------|-------|
+| `wifionice checkin --accept-terms` | Portal-Login inkl. Bestätigung der Nutzungsbedingungen; speichert lokalen Session-State |
+| `wifionice checkin --dry-run` | zeigt nur, was gesendet würde (kein Netzwerk) |
+| `wifionice status` | Portal erreichbar? Session aktiv? (CNA-API, Legacy-Fallback) |
+| `wifionice speed` | Zuggeschwindigkeit aus dem Onboard-ICE-Portal (nur im Zug erreichbar) |
+| `wifionice logout` | löscht den lokalen Session-State (das Gerät bleibt im Portal eingeloggt) |
+| `wifionice config` | zeigt die aufgelöste Konfiguration inkl. Quellen |
+| `wifionice version` | Paketversion |
 
-## Layout
-
-| Module | Role |
-|--------|------|
-| `exit_codes.py` | Documented exit constants and argparse mapping |
-| `errors.py` | `CliError`, `run_main`, JSON/human error emission |
-| `validation.py` | Positive ints, dates, paths, finite numbers |
-| `json_util.py` | `dumps(allow_nan=False)`, strict object parse |
-| `state.py` | Atomic writes; refuse null; dry-run skips I/O |
-| `url_util.py` | Prefix-preserving URL join |
-| `config.py` | env > file > keyring |
-| `cli.py` | Example wiring (copy patterns into your CLI) |
-
-## Field testing (offline → online)
-
-The playbook for testing a derived CLI like a real user would — and turning findings into issues:
-
-- [docs/TESTING.md](docs/TESTING.md) — two rounds: offline adversarial first, then online read-only against the real site (request budget, control requests, read-only rules, issue policy).
-- Report format that worked: capability table `feature | verdict | evidence`.
-
-## Scaffold a new CLI (one per day)
+Beispiele:
 
 ```bash
-python3 scripts/scaffold.py ../my-new-cli \
-    --package my_new_cli --cli-name my-new-cli \
-    --desc "What this CLI does"
+wifionice status --json
+wifionice checkin --accept-terms
+wifionice checkin --accept-terms --dry-run --json
+wifionice speed --json
+wifionice logout --dry-run
 ```
 
-Copies this reference repo, renames package / CLI name / env prefix / docs, runs `git init` plus an
-initial commit, then `uv sync` and the test suite. Useful flags:
+### checkin und AGB
 
-| Flag | Effect |
-|------|--------|
-| `--author "Name"` | Author in `pyproject.toml`/`LICENSE` |
-| `--github public\|private` | `gh repo create` + first push (needs `gh` auth) |
-| `--no-verify` | Skip `uv sync` and the test run |
-| `--no-git` | Skip `git init` and the initial commit |
+Der Portal-Login bestätigt die Nutzungsbedingungen des WIFIonICE-Portals. Deshalb verlangt ein echter Checkin explizit `--accept-terms` (sonst Exit-Code 1). `--dry-run` zeigt den geplanten Request-Ablauf, ohne etwas zu senden.
 
-## Shared MCP test suite (`tests/shared/`)
+## Exit-Codes
 
-Black-box checks against a real MCP server over **stdio**:
+| Code | Bedeutung |
+|------|-----------|
+| 0 | Erfolg |
+| 1 | Ungültige Eingabe (Flags, Argumente, Validierung); argparse-Fehler landen hier, nicht bei 2 |
+| 2 | Portal hat den Checkin abgelehnt (Auth/AGB) bzw. HTTP 401/403 |
+| 3 | Netzwerk-/Transportfehler (DNS, Timeout, HTTP 5xx) |
+| 4 | Antwort oder Datei nicht parsebar (JSON, Config, State) |
+| 130 | Abbruch (Ctrl-C) oder EOF |
 
-| Test module | What it checks |
-|-------------|----------------|
-| `test_stdio_mcp.py` | `initialize`, `tools/list` not empty, each tool has `description` + `inputSchema` |
-| `test_error_report.py` | A configured “error” tool returns JSON with a `report` object |
-| `test_redaction.py` | Your `redact()` hides passwords, bearer-style tokens, and e-mails |
+Implementierung: `wifionice_cli.exit_codes`, `wifionice_cli.errors.ArgumentParser`.
 
-Based on the stdio roundtrip and feedback tests in [ilias-mcp](https://github.com/smlfg/ilias-mcp).
+## Genutzte Portal-Endpunkte
 
-### Adopt in a new CLI/MCP repo
+Recherchiert und gegen Open-Source-Referenzen abgeglichen (siehe unten). Es wurden keine Endpunkte erfunden.
 
-1. Copy the directory:
+| Flow | Request | Antwort |
+|------|---------|---------|
+| CNA-Checkin (aktuell) | `POST {base}/cna/logon`, Body `{}`, Header `Content-Type: application/json`, `X-Requested-With: XMLHttpRequest`, `X-Csrf-Token: csrf`, `Referer: {base}/cna/` | JSON mit `result: "success"` |
+| CNA-Status | `GET {base}/cna/wifi/user_info` | JSON, u. a. `result.authenticated` (`"1"`/`"0"`) |
+| Legacy-Fallback (bei HTTP 404) | `GET {base}/de/` setzt ein `csrf`-Cookie, dann `POST {base}/de/` mit `login=true&CSRFToken=<token>` | HTML ohne `id="accept"`-Formular = eingeloggt |
+| Zuggeschwindigkeit | `GET {iceportal}/api1/rs/status` | JSON, u. a. `speed` (km/h), `servicelevel`, `connection` |
 
-   ```bash
-   cp -r path/to/wifionice/tests/shared ./tests/shared
-   ```
+Referenzen: [openwrt travelmate `wifibahn.login`](https://github.com/openwrt/packages/blob/master/net/travelmate/files/wifibahn.login), [binarynoise/CaptivePortalAutoLogin `DBWifi.kt`](https://github.com/binarynoise/CaptivePortalAutoLogin), [felix-zenk/onboardapis](https://github.com/felix-zenk/onboardapis), [derhuerst-Gist zum ICE-Portal](https://gist.github.com/derhuerst/bdca32a50c7ca4a004cee90745a7f68c).
 
-2. Add dev dependencies (if missing): `pytest`, `pytest-asyncio`, `mcp`.
+## Konfiguration
 
-3. Configure how pytest starts your server — **either** environment variables **or** fixtures. Without configuration the suite skips itself, so a CLI-only repo stays green.
+Präzedenz: Umgebungsvariablen > Konfigurationsdatei (`~/.config/wifionice/config.json`) > Defaults. Es gibt keine Zugangsdaten; Keyring wird nicht benötigt.
 
-   **Environment (good for CI):**
+| Variable | Default | Zweck |
+|----------|---------|-------|
+| `WIFIONICE_BASE_URL` | `https://wifi.bahn.de` | Basis-URL des Captive Portals |
+| `WIFIONICE_ICEPORTAL_URL` | `https://iceportal.de` | Onboard-ICE-Portal für `speed` |
+| `WIFIONICE_STATE` | `~/.local/state/wifionice/session.json` | Pfad des lokalen Session-States |
+| `WIFIONICE_TIMEOUT` | `5` | HTTP-Timeout in Sekunden |
+| `WIFIONICE_CONFIG` | `~/.config/wifionice/config.json` | Pfad der Konfigurationsdatei |
 
-   ```bash
-   export MCP_TEST_SERVER_COMMAND='["uv","--directory","/path/to/repo","run","your-mcp-entry"]'
-   export MCP_TEST_SERVER_NAME='your-mcp'          # optional
-   export MCP_TEST_ERROR_TOOL='your_login_tool'    # tool that returns ok:false + report without real credentials
-   export MCP_TEST_ERROR_TOOL_ARGS='{}'
-   export MCP_TEST_SERVER_ENV='{"YOUR_CONFIG_DIR":"/tmp/mcp-tests"}'  # optional JSON object
-   export MCP_TEST_REDACT='your_package.feedback:redact'
-   uv run pytest tests/shared
-   ```
+Konfigurationsdatei (JSON), alles optional:
 
-   **Fixtures (good for local dev)** — override in `tests/conftest.py`:
+```json
+{"base_url": "https://wifi.bahn.de", "iceportal_url": "https://iceportal.de", "timeout": 5}
+```
 
-   ```python
-   import pytest
-   from pathlib import Path
+## State
 
-   @pytest.fixture(scope="session")
-   def mcp_server_command() -> list[str]:
-       root = Path(__file__).resolve().parents[1]
-       return ["uv", "--directory", str(root), "run", "your-mcp"]
+- `checkin` schreibt den lokalen Session-State atomar (Temp-Datei + Rename) und ohne Secrets: Basis-URL, Methode, Zeitpunkt.
+- `--dry-run` führt keine Schreibzugriffe aus.
+- `logout` löscht nur den lokalen State; die Portal-Session des Geräts bleibt bestehen.
 
-   @pytest.fixture(scope="session")
-   def mcp_server_name() -> str:
-       return "your-mcp"
+## Tests
 
-   @pytest.fixture(scope="session")
-   def mcp_error_tool() -> str:
-       return "your_login_tool"
+Alle Tests laufen offline. `tests/fake_server.py` ist ein stdlib-HTTP-Server (`ThreadingHTTPServer`) mit Request-Recorder, der den echten Flow nachbildet: Portal-Seite, AGB-Formular, CSRF-Cookie, Checkin-POST, Status-JSON und ICE-Portal-Status.
 
-   @pytest.fixture(scope="session")
-   def redact_fn():
-       from your_package.feedback import redact
-       return redact
-   ```
+```bash
+uv run --extra dev pytest -q
+```
 
-4. Run project-specific tests and the shared suite together: `uv run pytest`.
+Contract-Tests (`tests/test_portal_contract.py`) decken Happy Path und Fehlerpfade ab: Netzwerk down → 3, kaputtes JSON → 4, fehlende/falsche Argumente → 1, Portal lehnt ab → 2, State/dry-run schreibt nichts, JSON-Envelope ist genau ein Objekt. `tests/test_readme_commands.py` hält README-Beispiele und `--help` synchron.
 
-### CI suggestion
+## Live-Check
 
-Run the shared suite in the same job as unit tests, with `MCP_TEST_*` set in the workflow `env:` block (no secrets required if the error tool only needs missing config/credentials).
+Stand 2026-10-13, Heimnetz, **ohne** Zug-WLAN; read-only (kein echter Checkin, keine Dateneingabe), ~8 Requests:
 
-## QA
+| Endpoint | Ergebnis | Bedeutung |
+|----------|----------|-----------|
+| `https://wifi.bahn.de/` | `NXDOMAIN` (öffentliches DNS) | Portal-Domain existiert nur im Zugnetz |
+| `https://login.wifionice.de/` | `NXDOMAIN` | ebenso |
+| `https://iceportal.de/` | HTTP 200, ICE-Portal-Seite (84 KB) | Host öffentlich erreichbar |
+| `https://iceportal.de/api1/rs/status` | HTTP 200, leerer Body (0 Bytes, `application/octet-stream`) | verwertbare JSON-Daten nur im Zug |
 
-See [docs/QA-CHECKLIST.md](docs/QA-CHECKLIST.md) before shipping a derived CLI.
+Fazit: `checkin` und `status` sind nur im WIFIonICE-Netz vollständig testbar; von zu Hause greift erwartetes Captive-Portal-Verhalten (kein DNS für die Portal-Hosts). `speed` liefert erst im Zug strukturierte Daten — deshalb bricht die CLI außerhalb des Zugnetzes sauber mit Exit-Code 4 ab, statt Werte zu erfinden. Ein echter Checkin wurde nicht ausgeführt.
 
-## CI
+## Grenzen
 
-- `.github/workflows/ci.yml` — lints nothing, but runs the full test suite (`uv run --extra dev pytest`) on Python 3.11, 3.12 and 3.13.
-- `.github/workflows/pii-guard.yml` — PII guard + gitleaks.
+- Echter Checkin, AGB-Schritt und aktive Session sind nur im Zug verifizierbar (siehe Live-Check).
+- `speed` ist die Zuggeschwindigkeit aus dem Onboard-Portal, keine Bandbreitenmessung.
+- `logout` wirkt nur lokal; ein Portal-Logoff (`POST /cna/logoff` ist dokumentiert, aber nicht implementiert) würde das Gerät trennen.
+- Die Portal-API ist nicht versioniert und kann sich ändern; die Legacy-Variante dient als Fallback.

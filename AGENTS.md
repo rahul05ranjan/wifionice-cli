@@ -1,17 +1,10 @@
 # Agent notes (wifionice)
 
-This repo is a **pattern library**, not a production product. When building or reviewing a derived CLI:
+CLI für das WIFIonICE-Captive-Portal. Diese Datei ergänzt die Template-Muster (exit_codes, errors, state, config, url_util, json_util, validation) um die Domänenregeln.
 
-1. **Exit codes** — Import `wifionice_cli.exit_codes`; use `errors.ArgumentParser` and `errors.run_main` so argparse usage exits with **1** and Ctrl-C/EOF exit **130**.
-2. **Errors** — Raise `CliError(message, code=...)`; never print tracebacks for expected failures. With `--json`, emit one object: `{"ok": false, "error": {"code": N, "message": "..."}}`.
-3. **Validation** — Use `validation.py` helpers; call `json_util.dumps` / `reject_nan_in_json_tree` before persisting.
-4. **State** — Use `state.save_state(..., dry_run=)`; never write `null`.
-5. **Config** — `config.resolve_config()`; env wins over file and keyring.
-6. **URLs** — `url_util.join_preserve_base_path`, not raw `urljoin` on prefixed bases.
-7. **Tests** — Copy patterns from `tests/test_cli_errors.py` and `tests/test_readme_commands.py`; stay offline; fixtures under `tests/fixtures/`.
-8. **Docs** — Keep README commands in sync with `--help`; run `docs/QA-CHECKLIST.md` mentally before marking work done.
-9. **Field test** — Test the CLI in operation, not the code: run `docs/TESTING.md` (offline adversarial first, then online read-only) and file findings with `.github/ISSUE_TEMPLATE/bug.md`. A ready-made opencode skill lives in `.opencode/skills/cli-betriebstest/`.
-
-Do **not** add secrets or invented personal data. Keep `ci.yml` and `pii-guard.yml`; add further workflows only when requested.
-
-Install for local work: `pip install -e ".[dev]"` then `pytest`.
+1. **Endpunkte nicht erfinden** — Nutze nur die in `README.md` dokumentierten Flows (`/cna/logon`, `/cna/wifi/user_info`, Legacy `/de/`, ICE-Portal `/api1/rs/status`) und aktualisiere die Endpunkt-Tabelle, wenn sich etwas ändert. `src/wifionice_cli/portal.py` ist die einzige Stelle mit HTTP-Aufrufen.
+2. **AGB** — Ein echter `checkin` erfordert `--accept-terms` (Exit 1 sonst). `--dry-run` zeigt den geplanten Ablauf und macht weder Netzwerk noch Schreibzugriffe.
+3. **Exit-Codes** — 0 ok, 1 Eingabe, 2 Portal-Ablehnung/Auth, 3 Netz, 4 Parse, 130 Abbruch. Transportfehler werden in `http_util.py` zentral gemappt.
+4. **State** — `state.save_state(..., dry_run=)`; keine Secrets in State/Ausgaben/Tracebacks. `logout` löscht nur lokal.
+5. **Tests offline** — Fake-Portal `tests/fake_server.py` (`ThreadingHTTPServer`, Request-Recorder); keine echten Requests in Tests. README-Beispiele müssen in `--help` stehen (`tests/test_readme_commands.py`).
+6. **Doku** — `docs/QA-CHECKLIST.md` vor Abschluss durchgehen; README (deutsch) mit `--help` synchron halten.
