@@ -1,4 +1,4 @@
-"""Error-path templates: subprocess CLI, no network, relative fixtures only."""
+"""Error-path templates: subprocess CLI, no network, isolated config/state."""
 
 from __future__ import annotations
 
@@ -13,9 +13,11 @@ from wifionice_cli import exit_codes as ec
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def run_cli(*args: str) -> subprocess.CompletedProcess[str]:
+def run_cli(tmp_path: Path, *args: str) -> subprocess.CompletedProcess[str]:
     env = os.environ.copy()
     env["PYTHONPATH"] = str(ROOT / "src")
+    env["WIFIONICE_CONFIG"] = str(tmp_path / "no-config.json")
+    env["WIFIONICE_STATE"] = str(tmp_path / "session.json")
     return subprocess.run(
         [sys.executable, "-m", "wifionice_cli", *args],
         cwd=ROOT,
@@ -25,13 +27,8 @@ def run_cli(*args: str) -> subprocess.CompletedProcess[str]:
     )
 
 
-def test_unknown_flag_exit_input():
-    proc = run_cli("--nope")
-    assert proc.returncode == ec.INPUT
-
-
-def test_validate_negative_count_json():
-    proc = run_cli("validate", "--count", "-1", "--json")
+def test_unknown_flag_exit_input(tmp_path: Path):
+    proc = run_cli(tmp_path, "--json", "--nope")
     assert proc.returncode == ec.INPUT
     payload = json.loads(proc.stdout)
     assert payload["ok"] is False
@@ -39,29 +36,33 @@ def test_validate_negative_count_json():
     assert len(proc.stdout.strip().splitlines()) == 1
 
 
-def test_validate_missing_args_human():
-    proc = run_cli("validate")
+def test_checkin_missing_accept_terms_human(tmp_path: Path):
+    proc = run_cli(tmp_path, "checkin")
     assert proc.returncode == ec.INPUT
     assert proc.stderr.strip()
+    assert "--accept-terms" in proc.stderr
 
 
-def test_state_dry_run_no_file(tmp_path: Path):
-    dest = tmp_path / "nested" / "state.json"
-    proc = run_cli(
-        "state",
-        str(dest),
-        "--set",
-        "k=v",
-        "--dry-run",
-        "--json",
-    )
-    assert proc.returncode == ec.OK
-    assert not dest.exists()
-
-
-def test_url_json_success():
-    proc = run_cli("url", "https://api.example.com/v1", "users", "--json")
+def test_version_json_is_single_object(tmp_path: Path):
+    proc = run_cli(tmp_path, "version", "--json")
     assert proc.returncode == ec.OK
     payload = json.loads(proc.stdout)
     assert payload["ok"] is True
-    assert payload["url"] == "https://api.example.com/v1/users"
+    assert payload["version"]
+
+
+def test_config_shows_defaults_without_files(tmp_path: Path):
+    proc = run_cli(tmp_path, "config", "--json")
+    assert proc.returncode == ec.OK
+    payload = json.loads(proc.stdout)
+    assert payload["base_url"] == "https://wifi.bahn.de"
+    assert payload["sources"]["base_url"] == "default"
+    assert payload["state_path"] == str(tmp_path / "session.json")
+    assert payload["sources"]["state_path"] == "env"
+
+
+def test_status_never_writes_state_with_dry_run(tmp_path: Path):
+    dest = tmp_path / "session.json"
+    proc = run_cli(tmp_path, "status", "--dry-run", "--json")
+    assert proc.returncode == ec.INPUT
+    assert not dest.exists()
