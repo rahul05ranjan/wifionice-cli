@@ -1,9 +1,9 @@
-"""Configuration: environment variables override file and optional keyring."""
+"""Configuration: environment variables override the JSON config file."""
 
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -11,18 +11,27 @@ from wifionice_cli import exit_codes as ec
 from wifionice_cli.errors import CliError
 from wifionice_cli.json_util import loads
 
-
 ENV_PREFIX = "WIFIONICE_"
 ENV_BASE_URL = f"{ENV_PREFIX}BASE_URL"
-ENV_API_TOKEN = f"{ENV_PREFIX}API_TOKEN"
+ENV_ICEPORTAL_URL = f"{ENV_PREFIX}ICEPORTAL_URL"
+ENV_STATE = f"{ENV_PREFIX}STATE"
+ENV_TIMEOUT = f"{ENV_PREFIX}TIMEOUT"
 CONFIG_FILE_ENV = f"{ENV_PREFIX}CONFIG"
+
+DEFAULT_BASE_URL = "https://wifi.bahn.de"
+DEFAULT_ICEPORTAL_URL = "https://iceportal.de"
+DEFAULT_TIMEOUT = 5.0
+DEFAULT_CONFIG_PATH = Path.home() / ".config" / "wifionice" / "config.json"
+DEFAULT_STATE_PATH = Path.home() / ".local" / "state" / "wifionice" / "session.json"
 
 
 @dataclass
 class ResolvedConfig:
-    base_url: str | None
-    api_token: str | None
-    sources: dict[str, str]
+    base_url: str
+    iceportal_url: str
+    state_path: Path
+    timeout: float
+    sources: dict[str, str] = field(default_factory=dict)
 
 
 def _load_file(path: Path) -> dict[str, Any]:
@@ -37,57 +46,80 @@ def _load_file(path: Path) -> dict[str, Any]:
     return data
 
 
-def _load_keyring(service: str) -> str | None:
+def _parse_timeout(value: str | float, *, source: str) -> float:
     try:
-        import keyring
-    except ImportError:
-        return None
-    try:
-        return keyring.get_password(service, "api_token")
-    except Exception:
-        return None
+        timeout = float(value)
+    except (TypeError, ValueError):
+        raise CliError(f"timeout must be a number, got {value!r} ({source})", code=ec.INPUT) from None
+    if timeout <= 0:
+        raise CliError(f"timeout must be positive, got {timeout} ({source})", code=ec.INPUT)
+    return timeout
 
 
 def resolve_config(
     *,
     config_path: Path | None = None,
-    keyring_service: str = "wifionice",
+    env: dict[str, str] | None = None,
 ) -> ResolvedConfig:
-    """Merge config with precedence: env > config file > keyring."""
+    """Merge config with precedence: environment > config file > built-in defaults."""
+    environ = os.environ if env is None else env
     sources: dict[str, str] = {}
-    file_path = Path(os.environ.get(CONFIG_FILE_ENV, "")) if os.environ.get(CONFIG_FILE_ENV) else None
-    if config_path is not None:
-        file_path = config_path
-    elif file_path is None:
-        file_path = Path.home() / ".config" / "wifionice" / "config.json"
 
-    file_data = _load_file(file_path) if file_path else {}
+    file_path = config_path
+    if file_path is None and environ.get(CONFIG_FILE_ENV):
+        file_path = Path(environ[CONFIG_FILE_ENV])
+    if file_path is None:
+        file_path = DEFAULT_CONFIG_PATH
+    file_data = _load_file(file_path)
     if file_data:
         sources["file"] = str(file_path)
 
-    base_url = os.environ.get(ENV_BASE_URL)
+    base_url = environ.get(ENV_BASE_URL)
     if base_url:
         sources["base_url"] = "env"
     elif file_data.get("base_url"):
         base_url = str(file_data["base_url"])
         sources["base_url"] = "file"
-
-    api_token = os.environ.get(ENV_API_TOKEN)
-    if api_token:
-        sources["api_token"] = "env"
-    elif file_data.get("api_token"):
-        api_token = str(file_data["api_token"])
-        sources["api_token"] = "file"
     else:
-        kr = _load_keyring(keyring_service)
-        if kr:
-            api_token = kr
-            sources["api_token"] = "keyring"
+        base_url = DEFAULT_BASE_URL
+        sources["base_url"] = "default"
 
-    return ResolvedConfig(base_url=base_url, api_token=api_token, sources=sources)
+    iceportal_url = environ.get(ENV_ICEPORTAL_URL)
+    if iceportal_url:
+        sources["iceportal_url"] = "env"
+    elif file_data.get("iceportal_url"):
+        iceportal_url = str(file_data["iceportal_url"])
+        sources["iceportal_url"] = "file"
+    else:
+        iceportal_url = DEFAULT_ICEPORTAL_URL
+        sources["iceportal_url"] = "default"
 
+    state_raw = environ.get(ENV_STATE)
+    if state_raw:
+        state_path = Path(state_raw)
+        sources["state_path"] = "env"
+    elif file_data.get("state_path"):
+        state_path = Path(str(file_data["state_path"]))
+        sources["state_path"] = "file"
+    else:
+        state_path = DEFAULT_STATE_PATH
+        sources["state_path"] = "default"
 
-def require_auth(cfg: ResolvedConfig) -> str:
-    if not cfg.api_token:
-        raise CliError("missing API token (set env or config)", code=ec.AUTH)
-    return cfg.api_token
+    timeout_raw = environ.get(ENV_TIMEOUT)
+    if timeout_raw is not None:
+        timeout = _parse_timeout(timeout_raw, source=ENV_TIMEOUT)
+        sources["timeout"] = "env"
+    elif file_data.get("timeout") is not None:
+        timeout = _parse_timeout(file_data["timeout"], source="config file")
+        sources["timeout"] = "file"
+    else:
+        timeout = DEFAULT_TIMEOUT
+        sources["timeout"] = "default"
+
+    return ResolvedConfig(
+        base_url=str(base_url).rstrip("/"),
+        iceportal_url=str(iceportal_url).rstrip("/"),
+        state_path=state_path,
+        timeout=timeout,
+        sources=sources,
+    )

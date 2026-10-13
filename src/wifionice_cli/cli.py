@@ -1,8 +1,9 @@
-"""Example CLI wiring together template patterns (copy into your project)."""
+"""wifionice — WIFIonICE (wifi.bahn.de) captive-portal CLI."""
 
 from __future__ import annotations
 
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 from wifionice_cli import __version__
@@ -10,21 +11,19 @@ from wifionice_cli import exit_codes as ec
 from wifionice_cli.config import resolve_config
 from wifionice_cli.errors import ArgumentParser, CliError, run_main
 from wifionice_cli.json_util import dumps
+from wifionice_cli.portal import PortalClient
 from wifionice_cli.state import load_state, save_state
 from wifionice_cli.url_util import join_preserve_base_path
-from wifionice_cli.validation import (
-    parse_date,
-    require_positive_int,
-    require_file,
-)
+from wifionice_cli.validation import reject_nan_in_json_tree, require_finite_number
 
 
 def _emit(data: dict, *, json_mode: bool) -> None:
+    reject_nan_in_json_tree(data)
     if json_mode:
         sys.stdout.write(dumps({"ok": True, **data}) + "\n")
     else:
-        for k, v in data.items():
-            print(f"{k}: {v}")
+        for key, value in data.items():
+            print(f"{key}: {value}")
 
 
 def build_parser(json_mode: bool) -> ArgumentParser:
@@ -35,44 +34,203 @@ def build_parser(json_mode: bool) -> ArgumentParser:
     global_flags.add_argument(
         "--dry-run",
         action="store_true",
-        help="do not persist state (no file writes)",
+        help="simulate: no network requests, no state writes",
     )
-    sub = parser.add_subparsers(dest="command", required=True)
-
-    sub.add_parser("version", parents=[global_flags], help="print package version")
-
-    p_cfg = sub.add_parser("config", parents=[global_flags], help="show resolved configuration")
-    p_cfg.add_argument(
+    config_flags = ArgumentParser(add_help=False)
+    config_flags.add_argument(
         "--config",
         type=Path,
         default=None,
         help="config JSON file (default: ~/.config/wifionice/config.json)",
     )
+    sub = parser.add_subparsers(dest="command", required=True)
 
-    p_state = sub.add_parser("state", parents=[global_flags], help="load or save JSON state file")
-    p_state.add_argument("state_path", type=Path, help="state file path")
-    p_state.add_argument(
-        "--set",
-        metavar="KEY=VALUE",
-        action="append",
-        default=[],
-        help="set key (repeatable); merges into existing state",
+    sub.add_parser("version", parents=[global_flags], help="print package version")
+
+    sub.add_parser(
+        "config",
+        parents=[global_flags, config_flags],
+        help="show resolved configuration (env > file > defaults)",
     )
 
-    p_url = sub.add_parser("url", parents=[global_flags], help="join base URL and path (prefix-safe)")
-    p_url.add_argument("base_url", help="API base URL, may include a path prefix")
-    p_url.add_argument("segment", help="relative path segment")
-
-    p_validate = sub.add_parser(
-        "validate",
-        parents=[global_flags],
-        help="run validation helpers on input",
+    p_checkin = sub.add_parser(
+        "checkin",
+        parents=[global_flags, config_flags],
+        help="log in to the portal (confirms the portal terms of use)",
     )
-    p_validate.add_argument("--count", type=int, help="positive integer")
-    p_validate.add_argument("--date", help="ISO date YYYY-MM-DD")
-    p_validate.add_argument("--file", type=Path, help="must be an existing file")
+    p_checkin.add_argument(
+        "--accept-terms",
+        action="store_true",
+        help="explicitly accept the WIFIonICE terms of use (required for a real checkin)",
+    )
+
+    sub.add_parser(
+        "status",
+        parents=[global_flags, config_flags],
+        help="portal reachable? session active? (CNA API, legacy fallback)",
+    )
+
+    sub.add_parser(
+        "speed",
+        parents=[global_flags, config_flags],
+        help="train speed from the onboard ICE portal (only reachable on board)",
+    )
+
+    sub.add_parser(
+        "logout",
+        parents=[global_flags, config_flags],
+        help="delete the local session state (does not log the device off the portal)",
+    )
 
     return parser
+
+
+def _checkin_plan(cfg) -> dict:
+    return {
+        "base_url": cfg.base_url,
+        "state_path": str(cfg.state_path),
+        "accept_terms": True,
+        "requests": [
+            {
+                "method": "POST",
+                "url": join_preserve_base_path(cfg.base_url, "cna/logon"),
+                "headers": {
+                    "Content-Type": "application/json",
+                    "X-Requested-With": "XMLHttpRequest",
+                    "X-Csrf-Token": "csrf",
+                },
+                "json": {},
+            },
+            {
+                "fallback_on_http_404": True,
+                "method": "POST",
+                "url": join_preserve_base_path(cfg.base_url, "de") + "/",
+                "form": {"login": "true", "CSRFToken": "<csrf from cookie>"},
+            },
+        ],
+    }
+
+
+def _cmd_checkin(args, cfg, *, json_mode: bool, dry_run: bool) -> int:
+    if not args.accept_terms and not dry_run:
+        raise CliError(
+            "checkin requires --accept-terms "
+            "(the portal login confirms the WIFIonICE terms of use)",
+            code=ec.INPUT,
+        )
+    if dry_run:
+        _emit({"command": "checkin", "dry_run": True, **_checkin_plan(cfg)}, json_mode=json_mode)
+        return ec.OK
+
+    client = PortalClient(cfg.base_url, iceportal_url=cfg.iceportal_url, timeout=cfg.timeout)
+    result = client.checkin()
+    state = {
+        "portal_base_url": cfg.base_url,
+        "method": result["method"],
+        "authenticated": True,
+        "checked_in_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+    }
+    save_state(cfg.state_path, state)
+    _emit(
+        {
+            "command": "checkin",
+            "checked_in": True,
+            "method": result["method"],
+            "state_path": str(cfg.state_path),
+        },
+        json_mode=json_mode,
+    )
+    return ec.OK
+
+
+def _cmd_status(args, cfg, *, json_mode: bool) -> int:
+    client = PortalClient(cfg.base_url, iceportal_url=cfg.iceportal_url, timeout=cfg.timeout)
+    info = client.status()
+    out: dict = {
+        "command": "status",
+        "portal_base_url": cfg.base_url,
+        "portal_reachable": True,
+        "authenticated": info.authenticated,
+        "method": info.method,
+    }
+    if info.session:
+        out["session"] = info.session
+    local = load_state(cfg.state_path)
+    if local is not None:
+        out["local"] = {
+            "state_path": str(cfg.state_path),
+            "checked_in_at": local.get("checked_in_at"),
+            "method": local.get("method"),
+        }
+    _emit(out, json_mode=json_mode)
+    return ec.OK
+
+
+def _cmd_speed(args, cfg, *, json_mode: bool) -> int:
+    client = PortalClient(cfg.base_url, iceportal_url=cfg.iceportal_url, timeout=cfg.timeout)
+    payload = client.iceportal_status()
+    if "speed" not in payload:
+        raise CliError(
+            "onboard ICE portal response has no speed field",
+            code=ec.PARSE,
+            details={"keys": sorted(payload.keys())},
+        )
+    speed = require_finite_number(payload["speed"], name="speed")
+    out = {
+        "command": "speed",
+        "iceportal_url": cfg.iceportal_url,
+        "train_speed_kmh": speed,
+        "servicelevel": payload.get("servicelevel"),
+        "connection": payload.get("connection"),
+        "note": "train speed from the onboard ICE portal, not a bandwidth measurement",
+    }
+    _emit(out, json_mode=json_mode)
+    return ec.OK
+
+
+def _cmd_logout(args, cfg, *, json_mode: bool, dry_run: bool) -> int:
+    local = load_state(cfg.state_path)
+    if local is None:
+        _emit(
+            {
+                "command": "logout",
+                "removed": False,
+                "state_path": str(cfg.state_path),
+                "detail": "no local session state found",
+            },
+            json_mode=json_mode,
+        )
+        return ec.OK
+    if dry_run:
+        _emit(
+            {
+                "command": "logout",
+                "dry_run": True,
+                "removed": False,
+                "state_path": str(cfg.state_path),
+                "detail": "would delete the local session state",
+            },
+            json_mode=json_mode,
+        )
+        return ec.OK
+    try:
+        cfg.state_path.unlink()
+    except OSError as e:
+        raise CliError(
+            f"cannot delete state: {cfg.state_path}",
+            code=ec.PARSE,
+            details={"reason": str(e)},
+        ) from e
+    _emit(
+        {
+            "command": "logout",
+            "removed": True,
+            "state_path": str(cfg.state_path),
+            "detail": "local state deleted; the device stays logged in on the portal",
+        },
+        json_mode=json_mode,
+    )
+    return ec.OK
 
 
 def _main(argv: list[str] | None = None) -> int:
@@ -90,55 +248,34 @@ def _main(argv: list[str] | None = None) -> int:
             print(__version__)
         return ec.OK
 
+    cfg = resolve_config(config_path=args.config)
+
     if args.command == "config":
-        cfg = resolve_config(config_path=args.config)
         _emit(
             {
+                "command": "config",
                 "base_url": cfg.base_url,
-                "api_token_set": bool(cfg.api_token),
+                "iceportal_url": cfg.iceportal_url,
+                "state_path": str(cfg.state_path),
+                "timeout": cfg.timeout,
                 "sources": cfg.sources,
             },
             json_mode=json_mode,
         )
         return ec.OK
 
-    if args.command == "state":
-        current = load_state(args.state_path) or {}
-        for item in args.set:
-            if "=" not in item:
-                raise CliError(f"expected KEY=VALUE, got {item!r}", code=ec.INPUT)
-            key, value = item.split("=", 1)
-            if not key:
-                raise CliError("state key must not be empty", code=ec.INPUT)
-            current[key] = value
-        save_state(args.state_path, current, dry_run=dry_run)
-        _emit(
-            {
-                "state_path": str(args.state_path),
-                "dry_run": dry_run,
-                "keys": sorted(current.keys()),
-            },
-            json_mode=json_mode,
-        )
-        return ec.OK
-
-    if args.command == "url":
-        joined = join_preserve_base_path(args.base_url, args.segment)
-        _emit({"url": joined}, json_mode=json_mode)
-        return ec.OK
-
-    if args.command == "validate":
-        out: dict = {}
-        if args.count is not None:
-            out["count"] = require_positive_int(args.count, name="count")
-        if args.date is not None:
-            out["date"] = str(parse_date(args.date))
-        if args.file is not None:
-            out["file"] = str(require_file(args.file))
-        if not out:
-            raise CliError("pass at least one of --count, --date, --file", code=ec.INPUT)
-        _emit(out, json_mode=json_mode)
-        return ec.OK
+    if args.command == "checkin":
+        return _cmd_checkin(args, cfg, json_mode=json_mode, dry_run=dry_run)
+    if args.command == "status":
+        if dry_run:
+            raise CliError("status does not support --dry-run", code=ec.INPUT)
+        return _cmd_status(args, cfg, json_mode=json_mode)
+    if args.command == "speed":
+        if dry_run:
+            raise CliError("speed does not support --dry-run", code=ec.INPUT)
+        return _cmd_speed(args, cfg, json_mode=json_mode)
+    if args.command == "logout":
+        return _cmd_logout(args, cfg, json_mode=json_mode, dry_run=dry_run)
 
     raise CliError(f"unknown command: {args.command}", code=ec.INPUT)
 
