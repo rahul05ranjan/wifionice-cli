@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import urllib.parse
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -44,6 +45,17 @@ def _load_file(path: Path) -> dict[str, Any]:
     if not isinstance(data, dict):
         raise CliError(f"config file must be a JSON object: {path}", code=ec.PARSE)
     return data
+
+
+def _validate_base_url(value: str, *, source: str) -> str:
+    base_url = str(value).rstrip("/")
+    parsed = urllib.parse.urlparse(base_url)
+    if parsed.scheme not in ("http", "https") or not parsed.netloc:
+        raise CliError(
+            f"base_url needs an http:// or https:// scheme with a host, got {value!r} ({source})",
+            code=ec.INPUT,
+        ) from None
+    return base_url
 
 
 def _parse_timeout(value: str | float, *, source: str) -> float:
@@ -117,7 +129,7 @@ def resolve_config(
         sources["timeout"] = "default"
 
     return ResolvedConfig(
-        base_url=str(base_url).rstrip("/"),
+        base_url=_validate_base_url(base_url, source=sources["base_url"]),
         iceportal_url=str(iceportal_url).rstrip("/"),
         state_path=state_path,
         timeout=timeout,

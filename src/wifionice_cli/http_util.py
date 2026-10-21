@@ -42,8 +42,8 @@ class HttpClient:
         headers: dict[str, str] | None = None,
         accept_status: tuple[int, ...] = (200,),
     ) -> HttpResult:
-        req = urllib.request.Request(url, data=data, headers=headers or {}, method=method)
         try:
+            req = urllib.request.Request(url, data=data, headers=headers or {}, method=method)
             with self._opener.open(req, timeout=self.timeout) as resp:
                 result = HttpResult(
                     status=resp.status,
@@ -63,6 +63,15 @@ class HttpClient:
                 body=body,
                 headers={k.lower(): v for k, v in (e.headers or {}).items()},
             )
+        except ValueError as e:
+            # urllib raises ValueError for a URL it cannot even parse (for
+            # example a base URL without a scheme); that is bad input, not a
+            # network failure.
+            raise CliError(
+                f"invalid url: {url}",
+                code=ec.INPUT,
+                details={"reason": str(e)},
+            ) from e
         except (urllib.error.URLError, socket.timeout, TimeoutError, OSError) as e:
             raise CliError(
                 f"cannot reach {url}",

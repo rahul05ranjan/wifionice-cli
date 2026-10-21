@@ -13,11 +13,15 @@ from wifionice_cli import exit_codes as ec
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def run_cli(tmp_path: Path, *args: str) -> subprocess.CompletedProcess[str]:
+def run_cli(
+    tmp_path: Path, *args: str, env_override: dict[str, str] | None = None
+) -> subprocess.CompletedProcess[str]:
     env = os.environ.copy()
     env["PYTHONPATH"] = str(ROOT / "src")
     env["WIFIONICE_CONFIG"] = str(tmp_path / "no-config.json")
     env["WIFIONICE_STATE"] = str(tmp_path / "session.json")
+    if env_override:
+        env.update(env_override)
     return subprocess.run(
         [sys.executable, "-m", "wifionice_cli", *args],
         cwd=ROOT,
@@ -66,3 +70,16 @@ def test_status_never_writes_state_with_dry_run(tmp_path: Path):
     proc = run_cli(tmp_path, "status", "--dry-run", "--json")
     assert proc.returncode == ec.INPUT
     assert not dest.exists()
+
+
+def test_base_url_without_scheme_is_clean_input_error(tmp_path: Path):
+    """WIFIONICE_BASE_URL=not-a-url used to die with a ValueError traceback
+    deep in urllib instead of a documented exit-1 input error (#6)."""
+    env_override = {"WIFIONICE_BASE_URL": "not-a-url"}
+    proc = run_cli(tmp_path, "status", "--json", env_override=env_override)
+    assert proc.returncode == ec.INPUT
+    payload = json.loads(proc.stdout)
+    assert payload["ok"] is False
+    assert payload["error"]["code"] == ec.INPUT
+    assert len(proc.stdout.strip().splitlines()) == 1
+    assert "Traceback" not in proc.stderr

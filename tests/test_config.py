@@ -86,3 +86,39 @@ def test_broken_config_file_is_parse_error(tmp_path: Path, monkeypatch):
         assert e.code == ec.PARSE
     else:
         raise AssertionError("expected CliError")
+
+
+def test_base_url_without_scheme_is_input_error(tmp_path: Path, monkeypatch):
+    _clear(monkeypatch)
+    monkeypatch.setenv(ENV_BASE_URL, "not-a-url")
+    try:
+        resolve_config(config_path=tmp_path / "missing.json")
+    except CliError as e:
+        assert e.code == ec.INPUT
+        assert "http://" in str(e)
+    else:
+        raise AssertionError("expected CliError")
+
+
+def test_base_url_without_host_is_input_error(tmp_path: Path, monkeypatch):
+    _clear(monkeypatch)
+    monkeypatch.setenv(ENV_BASE_URL, "http://")
+    try:
+        resolve_config(config_path=tmp_path / "missing.json")
+    except CliError as e:
+        assert e.code == ec.INPUT
+    else:
+        raise AssertionError("expected CliError")
+
+
+def test_base_url_from_file_without_scheme_is_input_error(tmp_path: Path, monkeypatch):
+    _clear(monkeypatch)
+    config_file = tmp_path / "config.json"
+    config_file.write_text(json.dumps({"base_url": "wifi.bahn.de"}), encoding="utf-8")
+    try:
+        resolve_config(config_path=config_file)
+    except CliError as e:
+        assert e.code == ec.INPUT
+        assert "file" in str(e)
+    else:
+        raise AssertionError("expected CliError")
